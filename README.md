@@ -47,8 +47,19 @@ web app, or any other front-end.
 git clone https://github.com/TheSirLancelot/idle.git
 cd idle
 
+# Create and activate a virtual environment (Windows PowerShell)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
 # Install in editable mode (includes dev dependencies)
 pip install -e ".[dev]"
+```
+
+On macOS/Linux, activate the environment with:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
 ```
 
 Or install only the runtime dependencies:
@@ -92,13 +103,35 @@ idle-clans market "Iron Ore"
 ## Running the tests
 
 ```bash
-pytest
+python -m pytest
 ```
 
 To run with coverage:
 
 ```bash
-pytest --cov=idle_clans_tools
+python -m pytest --cov=idle_clans_tools
+```
+
+---
+
+## Linting and formatting (Ruff)
+
+Run lint checks:
+
+```bash
+python -m ruff check .
+```
+
+Apply auto-fixes for lint issues where possible:
+
+```bash
+python -m ruff check . --fix
+```
+
+Run formatting:
+
+```bash
+python -m ruff format .
 ```
 
 ---
