@@ -22,9 +22,11 @@ from idle_clans_tools.api.exceptions import (
     NotFoundError,
     RateLimitError,
 )
+from idle_clans_tools.api.levels import level_for_experience, level_progress_percent
 from idle_clans_tools.api.models import (
     ClanInfo,
     ClanMember,
+    GameItem,
     LeaderboardEntry,
     MarketItem,
     PlayerProfile,
@@ -73,9 +75,18 @@ class TestGetPlayerProfile:
     def test_returns_player_profile(self, client: IdleClansClient) -> None:
         payload = {
             "username": "HeroPlayer",
+            "gameMode": "default",
             "guildName": "BraveClan",
             "combatLevel": 50,
             "skillExperiences": {"woodcutting": 100_000, "mining": 200_000},
+            "equipment": {"head": 845, "boots": -1},
+            "enchantmentBoosts": {"woodcutting": 20},
+            "upgrades": {"housing": 5},
+            "pvmStats": {"Griffin": 147},
+            "hoursOffline": 2,
+            "taskTypeOnLogout": 13,
+            "taskNameOnLogout": "royal_clan",
+            "activeServerId": None,
         }
         get_mock = _session_get_mock(client)
         get_mock.return_value = _make_response(200, payload)
@@ -84,10 +95,19 @@ class TestGetPlayerProfile:
 
         assert isinstance(profile, PlayerProfile)
         assert profile.username == "HeroPlayer"
+        assert profile.game_mode == "default"
         assert profile.clan_name == "BraveClan"
         assert profile.total_experience == 300_000
         assert profile.combat_level == 50
         assert profile.skills["woodcutting"] == 100_000
+        assert profile.equipment == {"head": 845, "boots": -1}
+        assert profile.enchantment_boosts == {"woodcutting": 20}
+        assert profile.upgrades == {"housing": 5}
+        assert profile.pvm_stats == {"Griffin": 147}
+        assert profile.hours_offline == 2
+        assert profile.task_type_on_logout == 13
+        assert profile.task_name_on_logout == "royal_clan"
+        assert profile.active_server_id is None
 
     def test_calls_correct_url_with_encoding(self, client: IdleClansClient) -> None:
         get_mock = _session_get_mock(client)
@@ -309,6 +329,77 @@ class TestGetMarketItems:
 
 
 # ---------------------------------------------------------------------------
+# Configuration tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetGameItems:
+    def test_returns_game_items_from_mongo_style_payload(self, client: IdleClansClient) -> None:
+        payload = (
+            '{ "Items" : { "_id" : ObjectId("68dbcedf373d27084f6d1c68"), '
+            '"Items" : [{ "ItemId" : 845, "Name" : "ghostly_hood", "BaseValue" : 4000, '
+            '"Category" : 0, "EquipmentSlot" : 11, "AssociatedSkill" : 17, '
+            '"IsTool" : false, "Discontinued" : false, "Unobtainable" : false }] } }'
+        )
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.ok = True
+        response.text = payload
+        get_mock = _session_get_mock(client)
+        get_mock.return_value = response
+
+        items = client.get_game_items()
+
+        assert len(items) == 1
+        assert isinstance(items[0], GameItem)
+        assert items[0].item_id == 845
+        assert items[0].name == "ghostly_hood"
+        assert items[0].display_name == "Ghostly Hood"
+        assert items[0].equipment_slot == 11
+        assert items[0].associated_skill == 17
+        assert items[0].is_tool is False
+        assert "/api/Configuration/game-data" in get_mock.call_args[0][0]
+
+    def test_item_lookup_is_keyed_by_item_id(self, client: IdleClansClient) -> None:
+        payload = (
+            '{ "Items" : { "Items" : ['
+            '{ "ItemId" : 425, "Name" : "diamond_ring_enchanted" },'
+            '{ "ItemId" : 539, "Name" : "godlike_lockpicks" }'
+            "] } }"
+        )
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.ok = True
+        response.text = payload
+        get_mock = _session_get_mock(client)
+        get_mock.return_value = response
+
+        lookup = client.get_item_lookup()
+
+        assert lookup[425].display_name == "Diamond Ring Enchanted"
+        assert lookup[539].display_name == "Godlike Lockpicks"
+
+    def test_game_data_parser_accepts_json_string_payload(self, client: IdleClansClient) -> None:
+        payload = (
+            '{ "Items" : { "Items" : ['
+            '{ "_id" : ObjectId("68dbcedf373d27084f6d1c68"), '
+            '"ItemId" : 845, "Name" : "ghostly_hood" }'
+            "] } }"
+        )
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.ok = True
+        response.text = json.dumps(payload)
+        get_mock = _session_get_mock(client)
+        get_mock.return_value = response
+
+        items = client.get_game_items()
+
+        assert items[0].item_id == 845
+        assert items[0].display_name == "Ghostly Hood"
+
+
+# ---------------------------------------------------------------------------
 # _get helper tests
 # ---------------------------------------------------------------------------
 
@@ -363,12 +454,36 @@ class TestGetHelper:
 
 
 class TestModels:
+    def test_level_for_experience_uses_idle_clans_thresholds(self) -> None:
+        assert level_for_experience(0) == 1
+        assert level_for_experience(74) == 1
+        assert level_for_experience(75) == 2
+        assert level_for_experience(88_474_738) == 119
+        assert level_for_experience(88_474_739) == 120
+        assert level_for_experience(500_000_000) == 120
+
+    def test_level_progress_percent_tracks_next_level_progress(self) -> None:
+        assert level_progress_percent(0) == 0
+        assert level_progress_percent(37) == pytest.approx(49.333333)
+        assert level_progress_percent(75) == 0
+        assert level_progress_percent(88_474_739) == 100
+        assert level_progress_percent(500_000_000) == 100
+
     def test_player_profile_defaults(self) -> None:
         profile = PlayerProfile.from_dict({})
         assert profile.username == ""
+        assert profile.game_mode is None
         assert profile.clan_name is None
         assert profile.total_experience == 0
         assert profile.skills == {}
+        assert profile.equipment == {}
+        assert profile.enchantment_boosts == {}
+        assert profile.upgrades == {}
+        assert profile.pvm_stats == {}
+        assert profile.hours_offline is None
+        assert profile.task_type_on_logout is None
+        assert profile.task_name_on_logout is None
+        assert profile.active_server_id is None
 
     def test_clan_info_defaults(self) -> None:
         info = ClanInfo.from_dict({})
@@ -391,3 +506,10 @@ class TestModels:
         assert item.item_name == "Coal"
         assert item.price == 123
         assert item.quantity == 77
+
+    def test_game_item_defaults(self) -> None:
+        item = GameItem.from_dict({})
+        assert item.item_id == 0
+        assert item.name == ""
+        assert item.base_value == 0
+        assert item.is_tool is None

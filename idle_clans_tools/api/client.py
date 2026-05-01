@@ -17,6 +17,8 @@ The client handles:
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 from urllib.parse import quote
 
@@ -28,6 +30,7 @@ from .exceptions import IdleClansAPIError, NetworkError, NotFoundError, RateLimi
 from .models import (
     ClanInfo,
     ClanMember,
+    GameItem,
     LeaderboardEntry,
     MarketItem,
     PlayerProfile,
@@ -60,6 +63,7 @@ class IdleClansClient:
         self.timeout = timeout
         self._session = session or requests.Session()
         self._session.headers.update({"Accept": "application/json"})
+        self._item_lookup_cache: dict[int, GameItem] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -103,6 +107,56 @@ class IdleClansClient:
             raise IdleClansAPIError(
                 "API returned a non-JSON response.", status_code=response.status_code
             ) from exc
+
+    def _get_game_data(self) -> dict[str, Any]:
+        """Fetch game-data, normalizing Mongo-style ObjectId tokens."""
+        url = f"{self.base_url}/api/Configuration/game-data"
+        try:
+            response = self._session.get(url, params=None, timeout=self.timeout)
+        except Timeout as exc:
+            raise NetworkError(f"Request timed out: {url}") from exc
+        except RequestsConnectionError as exc:
+            raise NetworkError(f"Connection failed: {url}") from exc
+        except RequestException as exc:
+            raise NetworkError(f"Request failed: {url}") from exc
+
+        if response.status_code == 404:
+            raise NotFoundError(f"Resource not found: {url}", status_code=404)
+        if response.status_code == 429:
+            raise RateLimitError(
+                "Rate limit exceeded. Please slow down requests.",
+                status_code=429,
+            )
+        if not response.ok:
+            raise IdleClansAPIError(
+                f"API returned status {response.status_code}: {response.text[:200]}",
+                status_code=response.status_code,
+            )
+
+        raw_payload = response.text
+        try:
+            for _ in range(2):
+                normalized = re.sub(
+                    r'ObjectId\("([^"]+)"\)',
+                    lambda match: json.dumps(match.group(1)),
+                    raw_payload,
+                )
+                data = json.loads(normalized)
+                if not isinstance(data, str):
+                    break
+                raw_payload = data
+        except ValueError as exc:
+            raise IdleClansAPIError(
+                "Game-data endpoint returned an unsupported response.",
+                status_code=response.status_code,
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise IdleClansAPIError(
+                "Game-data endpoint returned an unexpected payload.",
+                status_code=response.status_code,
+            )
+        return data
 
     # ------------------------------------------------------------------
     # Player endpoints
@@ -232,3 +286,23 @@ class IdleClansClient:
 
         needle = item_name.casefold()
         return [item for item in items if needle in item.item_name.casefold()]
+
+    # ------------------------------------------------------------------
+    # Configuration endpoints
+    # ------------------------------------------------------------------
+
+    def get_game_items(self) -> list[GameItem]:
+        """Fetch static item metadata from the game-data endpoint."""
+        data = self._get_game_data()
+        items_payload = data.get("Items")
+        if isinstance(items_payload, dict):
+            items_payload = items_payload.get("Items", [])
+        if not isinstance(items_payload, list):
+            return []
+        return [GameItem.from_dict(entry) for entry in items_payload if isinstance(entry, dict)]
+
+    def get_item_lookup(self) -> dict[int, GameItem]:
+        """Fetch static item metadata keyed by item id."""
+        if self._item_lookup_cache is None:
+            self._item_lookup_cache = {item.item_id: item for item in self.get_game_items()}
+        return dict(self._item_lookup_cache)
