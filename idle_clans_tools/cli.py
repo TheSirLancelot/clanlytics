@@ -22,6 +22,46 @@ import sys
 
 from .api import IdleClansClient
 from .api.exceptions import IdleClansAPIError, NetworkError, NotFoundError, RateLimitError
+from .api.levels import level_for_experience, level_progress_percent
+from .api.models import GameItem
+
+
+def _format_optional(value: object) -> str:
+    return str(value) if value is not None and value != "" else "(none)"
+
+
+def _print_mapping(title: str, values: dict[str, int]) -> None:
+    if not values:
+        return
+    print(f"\n{title}:")
+    for name, value in sorted(values.items(), key=lambda item: item[0].casefold()):
+        print(f"  {name:<28} {value:>12,}")
+
+
+def _print_skills(values: dict[str, int]) -> None:
+    if not values:
+        return
+    print("\nSkills:")
+    print(f"  {'Skill':<28} {'Level':>5} {'Next':>8} {'XP':>12}")
+    for name, xp in sorted(values.items(), key=lambda item: item[0].casefold()):
+        progress = f"{level_progress_percent(xp):.2f}%"
+        print(f"  {name:<28} {level_for_experience(xp):>5} {progress:>8} {xp:>12,}")
+
+
+def _print_equipment(values: dict[str, int], item_lookup: dict[int, GameItem]) -> None:
+    if not values:
+        return
+    print("\nEquipment:")
+    print(f"  {'Slot':<16} {'Item':<32}")
+    for slot, item_id in sorted(values.items(), key=lambda item: item[0].casefold()):
+        item = item_lookup.get(item_id)
+        if item_id < 0:
+            item_name = "(empty)"
+        elif item is None:
+            item_name = "(unknown)"
+        else:
+            item_name = item.display_name
+        print(f"  {slot:<16} {item_name:<32}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,14 +125,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _cmd_player(client: IdleClansClient, args: argparse.Namespace) -> None:
     profile = client.get_player_profile(args.username)
+    try:
+        item_lookup = client.get_item_lookup()
+    except IdleClansAPIError:
+        item_lookup = {}
+
     print(f"Player:           {profile.username}")
-    print(f"Guild/Clan:       {profile.clan_name or '(none)'}")
+    print(f"Game mode:        {_format_optional(profile.game_mode)}")
+    print(f"Guild/Clan:       {_format_optional(profile.clan_name)}")
     print(f"Combat level:     {profile.combat_level}")
     print(f"Total experience: {profile.total_experience:,}")
-    if profile.skills:
-        print("Skills:")
-        for skill, xp in sorted(profile.skills.items()):
-            print(f"  {skill:<20} {xp:>12,}")
+    print(f"Hours offline:    {_format_optional(profile.hours_offline)}")
+    print(f"Logout task type: {_format_optional(profile.task_type_on_logout)}")
+    print(f"Logout task name: {_format_optional(profile.task_name_on_logout)}")
+    print(f"Active server ID: {_format_optional(profile.active_server_id)}")
+
+    _print_skills(profile.skills)
+    _print_equipment(profile.equipment, item_lookup)
+    _print_mapping("Enchantment boosts", profile.enchantment_boosts)
+    _print_mapping("Upgrades", profile.upgrades)
+    _print_mapping("PvM stats", profile.pvm_stats)
 
 
 def _cmd_clan(client: IdleClansClient, args: argparse.Namespace) -> None:

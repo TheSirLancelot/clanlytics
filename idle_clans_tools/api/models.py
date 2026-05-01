@@ -11,6 +11,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _get_first(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Player models
 # ---------------------------------------------------------------------------
@@ -21,23 +35,24 @@ class PlayerProfile:
     """Profile information for a single player."""
 
     username: str
+    game_mode: str | None
     clan_name: str | None
     total_experience: int
     combat_level: int
     skills: dict[str, int] = field(default_factory=dict)
+    equipment: dict[str, int] = field(default_factory=dict)
+    enchantment_boosts: dict[str, int] = field(default_factory=dict)
+    upgrades: dict[str, int] = field(default_factory=dict)
+    pvm_stats: dict[str, int] = field(default_factory=dict)
+    hours_offline: int | float | None = None
+    task_type_on_logout: int | None = None
+    task_name_on_logout: str | None = None
+    active_server_id: str | int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PlayerProfile:
         # The API currently exposes player skill xp under "skillExperiences".
-        raw_skills = data.get("skills") or data.get("skillExperiences") or {}
-        if isinstance(raw_skills, dict):
-            skills = {
-                str(name): int(value)
-                for name, value in raw_skills.items()
-                if isinstance(value, (int, float))
-            }
-        else:
-            skills = {}
+        skills = _numeric_map(data.get("skills") or data.get("skillExperiences"))
 
         total_experience = data.get("totalExperience")
         if not isinstance(total_experience, (int, float)):
@@ -45,11 +60,44 @@ class PlayerProfile:
 
         return cls(
             username=data.get("username", ""),
+            game_mode=data.get("gameMode"),
             clan_name=data.get("clanName") or data.get("guildName"),
             total_experience=int(total_experience),
             combat_level=int(data.get("combatLevel", 0) or 0),
             skills=skills,
+            equipment=_numeric_map(data.get("equipment")),
+            enchantment_boosts=_numeric_map(data.get("enchantmentBoosts")),
+            upgrades=_numeric_map(data.get("upgrades")),
+            pvm_stats=_numeric_map(data.get("pvmStats")),
+            hours_offline=_optional_number(data.get("hoursOffline")),
+            task_type_on_logout=_optional_int(data.get("taskTypeOnLogout")),
+            task_name_on_logout=data.get("taskNameOnLogout"),
+            active_server_id=data.get("activeServerId"),
         )
+
+
+def _numeric_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(name): int(raw_value)
+        for name, raw_value in value.items()
+        if isinstance(raw_value, (int, float))
+    }
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _optional_number(value: Any) -> int | float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return value
+    return int(value)
 
 
 # ---------------------------------------------------------------------------
@@ -181,4 +229,37 @@ class MarketItem:
             price=int(price),
             quantity=int(quantity),
             seller=data.get("seller"),
+        )
+
+
+@dataclass
+class GameItem:
+    """Static item metadata from the game-data endpoint."""
+
+    item_id: int
+    name: str
+    base_value: int
+    category: int | None = None
+    equipment_slot: int | None = None
+    associated_skill: int | None = None
+    is_tool: bool | None = None
+    discontinued: bool | None = None
+    unobtainable: bool | None = None
+
+    @property
+    def display_name(self) -> str:
+        return self.name.replace("_", " ").title()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GameItem:
+        return cls(
+            item_id=_optional_int(_get_first(data, "ItemId", "itemId")) or 0,
+            name=str(_get_first(data, "Name", "itemName", "name") or ""),
+            base_value=_optional_int(_get_first(data, "BaseValue", "baseValue")) or 0,
+            category=_optional_int(_get_first(data, "Category", "category")),
+            equipment_slot=_optional_int(_get_first(data, "EquipmentSlot", "equipmentSlot")),
+            associated_skill=_optional_int(_get_first(data, "AssociatedSkill", "associatedSkill")),
+            is_tool=_optional_bool(_get_first(data, "IsTool", "isTool")),
+            discontinued=_optional_bool(_get_first(data, "Discontinued", "discontinued")),
+            unobtainable=_optional_bool(_get_first(data, "Unobtainable", "unobtainable")),
         )
