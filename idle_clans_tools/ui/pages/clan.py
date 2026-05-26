@@ -55,24 +55,31 @@ def _fetch_giveaway_profiles(
     client: IdleClansClient,
     usernames: list[str],
     cache_prefix: str,
-) -> dict[str, dict[str, int]]:
-    """Fetch skill XP maps for each username, using session-state caching."""
+) -> tuple[dict[str, dict[str, int]], list[str]]:
+    """Fetch skill XP maps for each username, using session-state caching.
+
+    Returns:
+        A tuple of (skills_by_username, failed_usernames).
+        Cache is stored under the ::data:: namespace so Refresh clears it.
+    """
     result: dict[str, dict[str, int]] = {}
+    failed: list[str] = []
     for username in usernames:
-        cache_key = f"{cache_prefix}::giveaway_profile::{username}"
+        # Store under ::data:: so the Refresh button clears stale entries.
+        cache_key = _cache_key(cache_prefix, f"giveaway_profile::{username}")
         if cache_key not in st.session_state:
             try:
                 profile = client.get_player_profile(username)
                 # Normalize keys to casefold so lookups are case-insensitive.
-                st.session_state[cache_key] = {
-                    k.casefold(): v for k, v in profile.skills.items()
-                }
+                st.session_state[cache_key] = {k.casefold(): v for k, v in profile.skills.items()}
             except (IdleClansAPIError, NotFoundError):
                 st.session_state[cache_key] = {}
         skills = st.session_state[cache_key]
         if skills:
             result[username] = skills
-    return result
+        else:
+            failed.append(username)
+    return result, failed
 
 
 def _get_pvm_stat(pvm_stats: dict[str, int], boss: str) -> int:
@@ -150,13 +157,9 @@ def _load_guard(loaded_key: str, button_key: str, label: str, section_prefix: st
         key=f"{button_key}::refresh",
         help=f"Re-fetch {label} data from the API",
     ):
-        # Clear the loaded flag and all cached data for this section so everything
-        # is re-fetched on the next render.
-        keys_to_delete = [
-            k for k in st.session_state if k.startswith(f"{section_prefix}::") and (
-                k == loaded_key or k.startswith(f"{section_prefix}::data::")
-            )
-        ]
+        # Clear only the cached data keys — keep the loaded flag so the tab
+        # stays open and immediately re-fetches from the API.
+        keys_to_delete = [k for k in st.session_state if k.startswith(f"{section_prefix}::data::")]
         for k in keys_to_delete:
             del st.session_state[k]
         st.rerun()
@@ -331,9 +334,7 @@ def _render_overview_tab(
             list,
             st.session_state.get(_cache_key(section_prefix, "cup_standings"), []),
         )
-        raw_exp_summary = st.session_state.get(
-            _cache_key(section_prefix, "experience_summary::96")
-        )
+        raw_exp_summary = st.session_state.get(_cache_key(section_prefix, "experience_summary::96"))
         st.json(
             {
                 "info": asdict(info),
@@ -392,9 +393,7 @@ def _render_contributions_tab(
             contribution_rows = []
             for player in experience_summary.player_contributions:
                 skill_snapshot = player.skills.get(skill)
-                skill_experience = (
-                    skill_snapshot.experience if skill_snapshot is not None else 0.0
-                )
+                skill_experience = skill_snapshot.experience if skill_snapshot is not None else 0.0
                 if skill_experience <= 0:
                     continue
                 contribution_rows.append(
@@ -435,57 +434,102 @@ def _render_giveaway_tab(
     section_prefix: str,
     active_clan_name: str,
 ) -> None:
-    if not _load_guard(
-        f"{section_prefix}::loaded::giveaway",
-        f"{section_prefix}::load_giveaway",
-        "Giveaway",
-        section_prefix,
-    ):
-        return
-
     st.subheader("Skill Giveaway")
     st.caption(
         "Ranks members by the % increase in a chosen skill's XP over a time window. "
         "Useful for running a fair giveaway that rewards relative effort."
     )
-    giveaway_hours = st.selectbox(
+
+    _SKILLS = [
+        "Agility",
+        "Archery",
+        "Attack",
+        "Brewing",
+        "Carpentry",
+        "Cooking",
+        "Crafting",
+        "Defence",
+        "Enchanting",
+        "Exterminating",
+        "Farming",
+        "Fishing",
+        "Foraging",
+        "Health",
+        "Invocation",
+        "Magic",
+        "Mining",
+        "Plundering",
+        "Smithing",
+        "Strength",
+        "Woodcutting",
+    ]
+    _HOURS = [24, 48, 72, 96, 120, 168]
+
+    col_skill, col_hours = st.columns(2)
+    giveaway_skill = col_skill.selectbox(
+        "Skill",
+        options=_SKILLS,
+        index=_SKILLS.index("Woodcutting"),
+        key=f"{section_prefix}::giveaway_skill",
+    )
+    giveaway_hours = col_hours.selectbox(
         "Giveaway Window",
-        options=[24, 48, 72, 96, 120, 168],
-        index=2,
+        options=_HOURS,
+        index=0,
         format_func=lambda h: f"Last {h} hours ({h // 24} day{'s' if h // 24 != 1 else ''})",
         key=f"{section_prefix}::giveaway_hours",
     )
+
+    # Key that tracks which (skill, hours) combo the current results are for.
+    result_key = _cache_key(section_prefix, f"giveaway_result::{giveaway_skill}::{giveaway_hours}")
+
+    # If the user changes skill/hours, clear any stale result so they must re-run.
+    last_params_key = f"{section_prefix}::giveaway_last_params"
+    current_params = (giveaway_skill, giveaway_hours)
+    if st.session_state.get(last_params_key) != current_params:
+        st.session_state.pop(result_key, None)
+        st.session_state[last_params_key] = current_params
+
+    if st.button(
+        "🎲 Run Giveaway",
+        key=f"{section_prefix}::giveaway_run",
+        type="primary",
+    ):
+        # Clear cached results for this combo so we re-fetch fresh data.
+        st.session_state.pop(result_key, None)
+        st.session_state.pop(
+            _cache_key(section_prefix, f"experience_summary::{giveaway_hours}"), None
+        )
+        # Also clear any stale player profile caches.
+        stale = [
+            k
+            for k in st.session_state
+            if k.startswith(_cache_key(section_prefix, "giveaway_profile::"))
+        ]
+        for k in stale:
+            del st.session_state[k]
+        st.session_state[f"{section_prefix}::giveaway_run_requested"] = True
+        st.rerun()
+
+    if not st.session_state.get(f"{section_prefix}::giveaway_run_requested"):
+        st.info("Select a skill and time window above, then click **🎲 Run Giveaway**.")
+        return
+
+    # ── Fetch summary ────────────────────────────────────────────────────────
     with st.spinner("Fetching clan contribution data..."):
         try:
             giveaway_summary = _get_cached_value(
                 _cache_key(section_prefix, f"experience_summary::{giveaway_hours}"),
-                lambda: client.get_clan_experience_summary(
-                    active_clan_name, hours=giveaway_hours
-                ),
+                lambda: client.get_clan_experience_summary(active_clan_name, hours=giveaway_hours),
             )
         except IdleClansAPIError as exc:
             render_api_error(exc)
-            giveaway_summary = None
+            return
 
-    if giveaway_summary is None:
-        return
-
-    available_giveaway_skills = sorted(giveaway_summary.skill_totals, key=str.casefold)
-    if not available_giveaway_skills or not giveaway_summary.player_contributions:
+    if not giveaway_summary.player_contributions:
         st.info("No clan contribution data was returned for the selected time window.")
         return
 
-    default_giveaway_skill = (
-        "Woodcutting"
-        if "Woodcutting" in available_giveaway_skills
-        else available_giveaway_skills[0]
-    )
-    giveaway_skill = st.selectbox(
-        "Skill",
-        options=available_giveaway_skills,
-        index=available_giveaway_skills.index(default_giveaway_skill),
-        key=f"{section_prefix}::giveaway_skill",
-    )
     candidates = [
         (player.username, player.skills[giveaway_skill].experience)
         for player in giveaway_summary.player_contributions
@@ -495,13 +539,21 @@ def _render_giveaway_tab(
         st.info(f"No {giveaway_skill} XP gains were recorded in the selected window.")
         return
 
+    # ── Fetch profiles ───────────────────────────────────────────────────────
     with st.spinner(
         f"Fetching player profiles to calculate % XP increase ({len(candidates)} players)..."
     ):
-        profile_skills = _fetch_giveaway_profiles(
+        profile_skills, failed_profiles = _fetch_giveaway_profiles(
             client,
             [username for username, _ in candidates],
             section_prefix,
+        )
+
+    if failed_profiles:
+        st.warning(
+            f"Could not fetch profiles for {len(failed_profiles)} player(s): "
+            f"{', '.join(failed_profiles)}. "
+            "They are excluded from the results. Try clicking **🎲 Run Giveaway** again to retry."
         )
 
     giveaway_rows = []
@@ -559,9 +611,7 @@ def _render_pvm_tab(
     baseline_upload_key = f"{section_prefix}::pvm_baseline"
     cmp_fetch_key = f"{section_prefix}::pvm_cmp_current"
 
-    tab_capture, tab_compare = st.tabs(
-        ["📸 Generate Snapshot", "📂 Compare Previous Snapshot"]
-    )
+    tab_capture, tab_compare = st.tabs(["📸 Generate Snapshot", "📂 Compare Previous Snapshot"])
 
     with tab_capture:
         st.caption(
@@ -577,10 +627,7 @@ def _render_pvm_tab(
             if snapshot_key in st.session_state:
                 del st.session_state[snapshot_key]
 
-        if (
-            st.session_state.get(capture_requested_key)
-            and snapshot_key not in st.session_state
-        ):
+        if st.session_state.get(capture_requested_key) and snapshot_key not in st.session_state:
             snapshot_members = _get_cached_value(
                 _cache_key(section_prefix, "members"),
                 lambda: client.get_clan_members(active_clan_name),
@@ -651,10 +698,7 @@ def _render_pvm_tab(
             try:
                 parsed = json.loads(uploaded_file.read())
             except (json.JSONDecodeError, ValueError):
-                st.error(
-                    "Could not parse the uploaded file. "
-                    "Make sure it is a valid JSON file."
-                )
+                st.error("Could not parse the uploaded file. Make sure it is a valid JSON file.")
                 st.session_state.pop(baseline_upload_key, None)
                 st.session_state.pop(cmp_fetch_key, None)
                 parsed = None
@@ -918,9 +962,7 @@ def render_clan_lookup(client: IdleClansClient) -> None:
         tab_giveaway,
         tab_pvm,
         tab_members,
-    ) = st.tabs(
-        ["📋 Overview", "📊 Contributions", "🎁 Giveaway", "⚔️ PvM Snapshot", "👥 Members"]
-    )
+    ) = st.tabs(["📋 Overview", "📊 Contributions", "🎁 Giveaway", "⚔️ PvM Snapshot", "👥 Members"])
 
     with tab_overview:
         _render_overview_tab(client, info, section_prefix)
